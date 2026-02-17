@@ -45,6 +45,7 @@ func TestReadTeamResolvesUnknownOptionalComputedCollections(t *testing.T) {
 
 	data := TeamResourceModel{
 		ID:                    types.StringValue("team-123"),
+		TeamID:                types.StringUnknown(),
 		TeamAlias:             types.StringValue("agent-team"),
 		Models:                types.ListUnknown(types.StringType),
 		Tags:                  types.ListUnknown(types.StringType),
@@ -142,6 +143,7 @@ func TestReadTeamWithNestedTeamInfoResponse(t *testing.T) {
 
 	data := TeamResourceModel{
 		ID:                    types.StringValue("team-abc-123"),
+		TeamID:                types.StringUnknown(),
 		TeamAlias:             types.StringValue("production-team"),
 		Models:                types.ListUnknown(types.StringType),
 		Tags:                  types.ListUnknown(types.StringType),
@@ -244,7 +246,7 @@ func TestBuildTeamRequest_RouterSettingsWithFallbacks(t *testing.T) {
 		RouterSettings: rs,
 	}
 
-	req := r.buildTeamRequest(ctx, data, "team-123")
+	req := r.buildTeamRequest(ctx, data)
 
 	rsPayload, ok := req["router_settings"].(map[string]interface{})
 	if !ok {
@@ -282,7 +284,7 @@ func TestBuildTeamRequest_NullRouterSettings_SendsEmptyToAPI(t *testing.T) {
 		RouterSettings: types.ObjectNull(routerSettingsAttrTypes),
 	}
 
-	req := r.buildTeamRequest(ctx, data, "team-123")
+	req := r.buildTeamRequest(ctx, data)
 
 	rs, exists := req["router_settings"]
 	if !exists {
@@ -599,5 +601,188 @@ func TestApplyTeamNullableClears_NoTransition_NoOp(t *testing.T) {
 
 	if v := teamReq["max_budget"]; v != float64(200) {
 		t.Errorf("helper overwrote stable max_budget; got %v, want 200", v)
+	}
+}
+
+func TestReadTeamPopulatesTeamID(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case "/team/info":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"team_info": map[string]interface{}{
+					"team_id":    "team-abc-123",
+					"team_alias": "my-team",
+				},
+			})
+		case "/team/permissions_list":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"team_member_permissions": []string{},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	r := &TeamResource{
+		client: &Client{
+			APIBase:    server.URL,
+			APIKey:     "test-key",
+			HTTPClient: server.Client(),
+		},
+	}
+
+	data := TeamResourceModel{
+		ID:                    types.StringValue("team-abc-123"),
+		TeamID:                types.StringUnknown(),
+		TeamAlias:             types.StringValue("my-team"),
+		Models:                types.ListUnknown(types.StringType),
+		Tags:                  types.ListUnknown(types.StringType),
+		Guardrails:            types.ListUnknown(types.StringType),
+		Prompts:               types.ListUnknown(types.StringType),
+		Metadata:              types.MapUnknown(types.StringType),
+		ModelAliases:          types.MapUnknown(types.StringType),
+		ModelRPMLimit:         types.MapUnknown(types.Int64Type),
+		ModelTPMLimit:         types.MapUnknown(types.Int64Type),
+		TeamMemberPermissions: types.ListUnknown(types.StringType),
+	}
+
+	if err := r.readTeam(context.Background(), &data); err != nil {
+		t.Fatalf("readTeam returned error: %v", err)
+	}
+
+	if data.TeamID.IsUnknown() {
+		t.Fatal("team_id should be known after read")
+	}
+	if data.TeamID.IsNull() {
+		t.Fatal("team_id should not be null after read")
+	}
+	if data.TeamID.ValueString() != "team-abc-123" {
+		t.Fatalf("expected team_id 'team-abc-123', got '%s'", data.TeamID.ValueString())
+	}
+	if data.ID.ValueString() != data.TeamID.ValueString() {
+		t.Fatalf("id and team_id should be equal: id=%s, team_id=%s", data.ID.ValueString(), data.TeamID.ValueString())
+	}
+}
+
+func TestReadTeamTeamIDNotUpdatedWhenAbsentInResponse(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case "/team/info":
+			// No team_id in response — team_id in data should remain unchanged
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"team_info": map[string]interface{}{
+					"team_alias": "my-team",
+				},
+			})
+		case "/team/permissions_list":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"team_member_permissions": []string{},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	r := &TeamResource{
+		client: &Client{
+			APIBase:    server.URL,
+			APIKey:     "test-key",
+			HTTPClient: server.Client(),
+		},
+	}
+
+	data := TeamResourceModel{
+		ID:                    types.StringValue("team-existing-999"),
+		TeamID:                types.StringValue("team-existing-999"),
+		TeamAlias:             types.StringValue("my-team"),
+		Models:                types.ListUnknown(types.StringType),
+		Tags:                  types.ListUnknown(types.StringType),
+		Guardrails:            types.ListUnknown(types.StringType),
+		Prompts:               types.ListUnknown(types.StringType),
+		Metadata:              types.MapUnknown(types.StringType),
+		ModelAliases:          types.MapUnknown(types.StringType),
+		ModelRPMLimit:         types.MapUnknown(types.Int64Type),
+		ModelTPMLimit:         types.MapUnknown(types.Int64Type),
+		TeamMemberPermissions: types.ListUnknown(types.StringType),
+	}
+
+	if err := r.readTeam(context.Background(), &data); err != nil {
+		t.Fatalf("readTeam returned error: %v", err)
+	}
+
+	// When API omits team_id, data.TeamID should remain at its prior value (not cleared)
+	if data.TeamID.IsNull() {
+		t.Fatal("team_id should not be null when API omits it — prior value should be preserved")
+	}
+	if data.TeamID.ValueString() != "team-existing-999" {
+		t.Fatalf("expected team_id to remain 'team-existing-999', got '%s'", data.TeamID.ValueString())
+	}
+}
+
+func TestReadTeamResolvesTeamIDUnknown(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case "/team/info":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"team_alias": "agent-team",
+				"team_id":    "team-resolved-456",
+				"blocked":    false,
+			})
+		case "/team/permissions_list":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"team_member_permissions": []string{},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	r := &TeamResource{
+		client: &Client{
+			APIBase:    server.URL,
+			APIKey:     "test-key",
+			HTTPClient: server.Client(),
+		},
+	}
+
+	data := TeamResourceModel{
+		ID:                    types.StringValue("team-resolved-456"),
+		TeamID:                types.StringUnknown(),
+		TeamAlias:             types.StringValue("agent-team"),
+		Models:                types.ListUnknown(types.StringType),
+		Tags:                  types.ListUnknown(types.StringType),
+		Guardrails:            types.ListUnknown(types.StringType),
+		Prompts:               types.ListUnknown(types.StringType),
+		Metadata:              types.MapUnknown(types.StringType),
+		ModelAliases:          types.MapUnknown(types.StringType),
+		ModelRPMLimit:         types.MapUnknown(types.Int64Type),
+		ModelTPMLimit:         types.MapUnknown(types.Int64Type),
+		TeamMemberPermissions: types.ListUnknown(types.StringType),
+	}
+
+	if err := r.readTeam(context.Background(), &data); err != nil {
+		t.Fatalf("readTeam returned error: %v", err)
+	}
+
+	if data.TeamID.IsUnknown() {
+		t.Fatal("team_id should be known after read")
+	}
+	if data.TeamID.ValueString() != "team-resolved-456" {
+		t.Fatalf("expected team_id 'team-resolved-456', got '%s'", data.TeamID.ValueString())
 	}
 }
