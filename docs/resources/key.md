@@ -28,6 +28,36 @@ resource "litellm_key" "predefined" {
 }
 ```
 
+### Write-only Key from Secrets Manager (not stored in state)
+
+Source the token from a secret **without persisting it in Terraform state**, using a
+write-only argument (`key_wo`) fed by an ephemeral `aws_secretsmanager_secret_version`.
+Secrets Manager stays the single source of truth; the raw token never lands in state.
+
+Requires Terraform >= 1.11.
+
+```hcl
+# Ephemeral: its value is NOT written to state or plan files.
+ephemeral "aws_secretsmanager_secret_version" "litellm_keys" {
+  secret_id = "litellm/prd/virtual-keys"
+}
+
+resource "litellm_key" "wo" {
+  key_alias = "prod-key-1"
+  models    = ["gpt-4o"]
+
+  # key_wo is sent to LiteLLM but never stored in state.
+  key_wo = jsondecode(ephemeral.aws_secretsmanager_secret_version.litellm_keys.secret_string)["prod-key-1"]
+  # Bump this to rotate (re-reads the ephemeral secret and re-creates the key).
+  key_wo_version = "1"
+}
+```
+
+Notes:
+- `key_wo` and `key` are mutually exclusive; `key_wo` requires `key_wo_version`.
+- Changing `key_wo_version` replaces the key (rotation). The `key` attribute stays `null`
+  in state, and the non-sensitive `id` (a SHA256 hash) is used for identity.
+
 ### Key with Budget and Rate Limits
 
 ```hcl
