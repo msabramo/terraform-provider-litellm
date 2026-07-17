@@ -68,6 +68,13 @@ type MCPServerResourceModel struct {
 	RegistrationURL   types.String `tfsdk:"registration_url"`
 	AllowAllKeys      types.Bool   `tfsdk:"allow_all_keys"`
 	SkipURLValidation types.Bool   `tfsdk:"skip_url_validation"`
+	// OAuth / networking extras
+	OAuthScopes               types.List   `tfsdk:"oauth_scopes"`
+	AvailableOnPublicInternet types.Bool   `tfsdk:"available_on_public_internet"`
+	OAuth2Flow                types.String `tfsdk:"oauth2_flow"`
+	Instructions              types.String `tfsdk:"instructions"`
+	ToolNameToDisplayName     types.Map    `tfsdk:"tool_name_to_display_name"`
+	ToolNameToDescription     types.Map    `tfsdk:"tool_name_to_description"`
 	// Computed fields
 	CreatedAt types.String `tfsdk:"created_at"`
 	CreatedBy types.String `tfsdk:"created_by"`
@@ -199,6 +206,33 @@ func (r *MCPServerResource) Schema(ctx context.Context, req resource.SchemaReque
 			},
 			"skip_url_validation": schema.BoolAttribute{
 				Description: "Skip MCP server URL reachability validation during creation/update. Useful when the MCP server is reachable by LiteLLM but not by the Terraform runner or validation path.",
+				Optional:    true,
+			},
+			"oauth_scopes": schema.ListAttribute{
+				Description: "OAuth2 scopes to request. Sent to the API as a list under credentials.scopes (which credentials, a map of strings, cannot represent).",
+				ElementType: types.StringType,
+				Optional:    true,
+			},
+			"available_on_public_internet": schema.BoolAttribute{
+				Description: "Whether the MCP server is reachable from the public internet. Set to false to restrict access to the internal network only.",
+				Optional:    true,
+			},
+			"oauth2_flow": schema.StringAttribute{
+				Description: "OAuth2 flow to use: 'client_credentials' or 'authorization_code'.",
+				Optional:    true,
+			},
+			"instructions": schema.StringAttribute{
+				Description: "Instructions shown to users for this MCP server.",
+				Optional:    true,
+			},
+			"tool_name_to_display_name": schema.MapAttribute{
+				Description: "Map of tool name to a friendly display name.",
+				ElementType: types.StringType,
+				Optional:    true,
+			},
+			"tool_name_to_description": schema.MapAttribute{
+				Description: "Map of tool name to a custom description.",
+				ElementType: types.StringType,
 				Optional:    true,
 			},
 			"created_at": schema.StringAttribute{
@@ -480,6 +514,29 @@ func (r *MCPServerResource) buildMCPServerRequest(ctx context.Context, data *MCP
 	if !data.SkipURLValidation.IsNull() && !data.SkipURLValidation.IsUnknown() {
 		mcpReq["skip_url_validation"] = data.SkipURLValidation.ValueBool()
 	}
+	if !data.AvailableOnPublicInternet.IsNull() && !data.AvailableOnPublicInternet.IsUnknown() {
+		mcpReq["available_on_public_internet"] = data.AvailableOnPublicInternet.ValueBool()
+	}
+	if !data.OAuth2Flow.IsNull() && !data.OAuth2Flow.IsUnknown() && data.OAuth2Flow.ValueString() != "" {
+		mcpReq["oauth2_flow"] = data.OAuth2Flow.ValueString()
+	}
+	if !data.Instructions.IsNull() && !data.Instructions.IsUnknown() && data.Instructions.ValueString() != "" {
+		mcpReq["instructions"] = data.Instructions.ValueString()
+	}
+	if !data.ToolNameToDisplayName.IsNull() && !data.ToolNameToDisplayName.IsUnknown() {
+		var m map[string]string
+		data.ToolNameToDisplayName.ElementsAs(ctx, &m, false)
+		if len(m) > 0 {
+			mcpReq["tool_name_to_display_name"] = m
+		}
+	}
+	if !data.ToolNameToDescription.IsNull() && !data.ToolNameToDescription.IsUnknown() {
+		var m map[string]string
+		data.ToolNameToDescription.ElementsAs(ctx, &m, false)
+		if len(m) > 0 {
+			mcpReq["tool_name_to_description"] = m
+		}
+	}
 
 	// List fields - check IsNull, IsUnknown, and len > 0
 	if !data.MCPAccessGroups.IsNull() && !data.MCPAccessGroups.IsUnknown() {
@@ -515,12 +572,25 @@ func (r *MCPServerResource) buildMCPServerRequest(ctx context.Context, data *MCP
 		}
 	}
 
+	// credentials (map of strings) + oauth_scopes injected as a list under "scopes"
+	// (the API expects credentials.scopes as a list, which a plain map[string]string cannot hold).
+	credentials := map[string]interface{}{}
 	if !data.Credentials.IsNull() && !data.Credentials.IsUnknown() {
-		var credentials map[string]string
-		data.Credentials.ElementsAs(ctx, &credentials, false)
-		if len(credentials) > 0 {
-			mcpReq["credentials"] = credentials
+		var credMap map[string]string
+		data.Credentials.ElementsAs(ctx, &credMap, false)
+		for k, v := range credMap {
+			credentials[k] = v
 		}
+	}
+	if !data.OAuthScopes.IsNull() && !data.OAuthScopes.IsUnknown() {
+		var scopes []string
+		data.OAuthScopes.ElementsAs(ctx, &scopes, false)
+		if len(scopes) > 0 {
+			credentials["scopes"] = scopes
+		}
+	}
+	if len(credentials) > 0 {
+		mcpReq["credentials"] = credentials
 	}
 
 	if !data.ExtraHeaders.IsNull() && !data.ExtraHeaders.IsUnknown() {
@@ -627,6 +697,45 @@ func (r *MCPServerResource) readMCPServer(ctx context.Context, data *MCPServerRe
 	}
 	if createdBy, ok := result["created_by"].(string); ok {
 		data.CreatedBy = types.StringValue(createdBy)
+	}
+	// OAuth / networking extras - only overwrite when the config set them (preserve null otherwise)
+	if v, ok := result["available_on_public_internet"].(bool); ok && !data.AvailableOnPublicInternet.IsNull() {
+		data.AvailableOnPublicInternet = types.BoolValue(v)
+	}
+	if v, ok := result["oauth2_flow"].(string); ok && !data.OAuth2Flow.IsNull() {
+		data.OAuth2Flow = types.StringValue(v)
+	}
+	if v, ok := result["instructions"].(string); ok && !data.Instructions.IsNull() {
+		data.Instructions = types.StringValue(v)
+	}
+	if cred, ok := result["credentials"].(map[string]interface{}); ok && !data.OAuthScopes.IsNull() {
+		if sc, ok := cred["scopes"].([]interface{}); ok {
+			vals := make([]attr.Value, len(sc))
+			for i, s := range sc {
+				if str, ok := s.(string); ok {
+					vals[i] = types.StringValue(str)
+				}
+			}
+			data.OAuthScopes, _ = types.ListValue(types.StringType, vals)
+		}
+	}
+	if m, ok := result["tool_name_to_display_name"].(map[string]interface{}); ok && !data.ToolNameToDisplayName.IsNull() {
+		mm := map[string]attr.Value{}
+		for k, v := range m {
+			if str, ok := v.(string); ok {
+				mm[k] = types.StringValue(str)
+			}
+		}
+		data.ToolNameToDisplayName, _ = types.MapValue(types.StringType, mm)
+	}
+	if m, ok := result["tool_name_to_description"].(map[string]interface{}); ok && !data.ToolNameToDescription.IsNull() {
+		mm := map[string]attr.Value{}
+		for k, v := range m {
+			if str, ok := v.(string); ok {
+				mm[k] = types.StringValue(str)
+			}
+		}
+		data.ToolNameToDescription, _ = types.MapValue(types.StringType, mm)
 	}
 	// Handle access groups - preserve null when API returns empty and config didn't specify
 	if accessGroups, ok := result["mcp_access_groups"].([]interface{}); ok && len(accessGroups) > 0 {

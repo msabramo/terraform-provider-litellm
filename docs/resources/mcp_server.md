@@ -167,6 +167,12 @@ The following arguments are supported:
 - `registration_url` - (String) OAuth2 dynamic client registration URL (used with `oauth2` auth type).
 - `allow_all_keys` - (Bool) Whether all API keys are allowed to access this MCP server.
 - `skip_url_validation` - (Bool) Skip MCP server URL reachability validation during creation/update. Use this when the MCP server is reachable from LiteLLM but not from the Terraform runner or validation path.
+- `oauth_scopes` - (List of String) OAuth2 scopes to request. Sent to the API as a list under `credentials.scopes`. Use this instead of putting `scopes` inside `credentials` (a map of strings cannot represent a list; the API rejects it with a `422` error).
+- `available_on_public_internet` - (Bool) Whether the MCP server is reachable from the public internet. Set to `false` to restrict access to the internal network only ("Internal network only" in the UI).
+- `oauth2_flow` - (String) OAuth2 flow to use: `client_credentials` or `authorization_code`.
+- `instructions` - (String) Instructions shown to users for this MCP server.
+- `tool_name_to_display_name` - (Map of String) Map of tool name to a friendly display name.
+- `tool_name_to_description` - (Map of String) Map of tool name to a custom description.
 
 ### Nested Blocks
 
