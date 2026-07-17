@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`litellm_mcp_server`**: New optional attributes to cover more of the LiteLLM MCP server API surface:
+  - `oauth_scopes` (list of string) — OAuth2 scopes. Sent to the API as `credentials.scopes` (a list). Previously scopes could not be set: putting them in `credentials` (a `map[string]string`) made the API reject the request with `422 "Input should be a valid list"`.
+  - `available_on_public_internet` (bool) — set `false` to restrict the server to the internal network ("Internal network only" in the UI).
+  - `oauth2_flow` (string) — `client_credentials` or `authorization_code`.
+  - `instructions` (string).
+  - `tool_name_to_display_name` / `tool_name_to_description` (map of string).
+
 ## [2.0.1] - 2026-06-12
 
 ### Fixed
