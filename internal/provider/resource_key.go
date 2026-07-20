@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/resourcevalidator"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -21,6 +22,23 @@ import (
 var _ resource.Resource = &KeyResource{}
 var _ resource.ResourceWithImportState = &KeyResource{}
 var _ resource.ResourceWithUpgradeState = &KeyResource{}
+var _ resource.ResourceWithConfigValidators = &KeyResource{}
+
+// ConfigValidators enforces the write-only key contract: `key_wo` must be paired
+// with `key_wo_version` (needed to detect rotation, since write-only values are not
+// persisted in state), and `key`/`key_wo` are mutually exclusive.
+func (r *KeyResource) ConfigValidators(ctx context.Context) []resource.ConfigValidator {
+	return []resource.ConfigValidator{
+		resourcevalidator.RequiredTogether(
+			path.MatchRoot("key_wo"),
+			path.MatchRoot("key_wo_version"),
+		),
+		resourcevalidator.Conflicting(
+			path.MatchRoot("key"),
+			path.MatchRoot("key_wo"),
+		),
+	}
+}
 
 // hashKeyForID produces a non-sensitive identifier from a raw API key.
 // Format: "sha256:<hex digest>" so it is self-documenting and non-reversible.
@@ -40,6 +58,8 @@ type KeyResource struct {
 type KeyResourceModel struct {
 	ID                       types.String  `tfsdk:"id"`
 	Key                      types.String  `tfsdk:"key"`
+	KeyWO                    types.String  `tfsdk:"key_wo"`
+	KeyWOVersion             types.String  `tfsdk:"key_wo_version"`
 	Models                   types.List    `tfsdk:"models"`
 	AllowedRoutes            types.List    `tfsdk:"allowed_routes"`
 	AllowedPassthroughRoutes types.List    `tfsdk:"allowed_passthrough_routes"`
@@ -91,12 +111,32 @@ func (r *KeyResource) Schema(ctx context.Context, req resource.SchemaRequest, re
 				},
 			},
 			"key": schema.StringAttribute{
-				Description: "The API key value. If not specified, a key will be generated.",
+				Description: "The API key value. If not specified, a key will be generated. " +
+					"Use `key_wo` instead to source the value from an ephemeral secret without persisting it in state.",
 				Optional:    true,
 				Computed:    true,
 				Sensitive:   true,
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.UseStateForUnknown(),
+				},
+			},
+			"key_wo": schema.StringAttribute{
+				Description: "Write-only API key value, typically sourced from an ephemeral " +
+					"`aws_secretsmanager_secret_version` (Secrets Manager as source of truth). " +
+					"Its value is sent to LiteLLM but NEVER persisted in Terraform state. " +
+					"When set it takes precedence over `key`; pair it with `key_wo_version` to " +
+					"trigger rotation. Requires Terraform >= 1.11.",
+				Optional:  true,
+				Sensitive: true,
+				WriteOnly: true,
+			},
+			"key_wo_version": schema.StringAttribute{
+				Description: "Version/nonce for `key_wo`. Since write-only values are not stored " +
+					"in state, changing this value signals the provider to re-read the ephemeral " +
+					"secret and re-create the key with the new token (rotation).",
+				Optional: true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
 				},
 			},
 			"models": schema.ListAttribute{
@@ -296,7 +336,20 @@ func (r *KeyResource) Create(ctx context.Context, req resource.CreateRequest, re
 		return
 	}
 
+	// Write-only values are not available in the plan/state; read them from the config.
+	var keyWO types.String
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("key_wo"), &keyWO)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	woMode := !keyWO.IsNull() && keyWO.ValueString() != ""
+
 	keyReq := r.buildKeyRequest(ctx, &data)
+	if woMode {
+		// Secrets Manager (or any ephemeral source) is the source of truth: send the
+		// write-only token to LiteLLM but never persist the plaintext in state.
+		keyReq["key"] = keyWO.ValueString()
+	}
 
 	endpoint := "/key/generate"
 	if !data.ServiceAccountID.IsNull() && data.ServiceAccountID.ValueString() != "" {
@@ -310,8 +363,13 @@ func (r *KeyResource) Create(ctx context.Context, req resource.CreateRequest, re
 	}
 
 	if keyVal, ok := result["key"].(string); ok {
-		data.Key = types.StringValue(keyVal)
 		data.ID = types.StringValue(hashKeyForID(keyVal))
+		if woMode {
+			// Do NOT store the plaintext token in state; the ephemeral secret owns it.
+			data.Key = types.StringNull()
+		} else {
+			data.Key = types.StringValue(keyVal)
+		}
 	}
 
 	// Read back for full state
@@ -360,7 +418,20 @@ func (r *KeyResource) Update(ctx context.Context, req resource.UpdateRequest, re
 	data.Key = state.Key
 
 	updateReq := r.buildKeyRequest(ctx, &data)
-	updateReq["key"] = data.Key.ValueString()
+
+	// The token identifies the key in /key/update. In write-only mode it is not in
+	// state, so read it from the config; otherwise use the stored key value.
+	if !state.KeyWOVersion.IsNull() {
+		var keyWO types.String
+		resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("key_wo"), &keyWO)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		updateReq["key"] = keyWO.ValueString()
+		data.Key = types.StringNull() // keep the plaintext out of state
+	} else {
+		updateReq["key"] = data.Key.ValueString()
+	}
 
 	if err := r.client.DoRequestWithResponse(ctx, "POST", "/key/update", updateReq, nil); err != nil {
 		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to update key: %s", err))
@@ -792,7 +863,9 @@ func (r *KeyResource) readKey(ctx context.Context, data *KeyResourceModel) error
 	// custom key value it is already known and must NOT be overwritten — the
 	// /key/info endpoint returns a hashed token, not the raw key, so
 	// overwriting would cause "inconsistent values for sensitive attribute".
-	if data.Key.IsUnknown() || data.Key.IsNull() {
+	// In write-only mode (key_wo/key_wo_version) the token lives only in the ephemeral
+	// source (Secrets Manager); key stays null in state and must not be repopulated.
+	if data.KeyWOVersion.IsNull() && (data.Key.IsUnknown() || data.Key.IsNull()) {
 		if keyValue, ok := result["key"].(string); ok && keyValue != "" {
 			data.Key = types.StringValue(keyValue)
 			data.ID = types.StringValue(hashKeyForID(keyValue))

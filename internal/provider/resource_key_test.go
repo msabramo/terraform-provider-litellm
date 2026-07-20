@@ -10,6 +10,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 )
@@ -1407,5 +1408,109 @@ func TestReadKeyPopulatesUnknownKey(t *testing.T) {
 
 	if data.Key.ValueString() != apiReturnedKey {
 		t.Errorf("key should remain %q, got %q", apiReturnedKey, data.Key.ValueString())
+	}
+}
+
+// keySchema is a small helper that returns the resource schema so write-only
+// attribute tests can introspect it.
+func keySchema(t *testing.T) schema.Schema {
+	t.Helper()
+	resp := &resource.SchemaResponse{}
+	(&KeyResource{}).Schema(context.Background(), resource.SchemaRequest{}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("schema build returned diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	return resp.Schema
+}
+
+// TestKeyWOSchemaAttributes locks in the write-only contract of key_wo: it must
+// be Optional, Sensitive, and WriteOnly (so its value is never persisted in
+// state), and it must NOT be Computed (the ephemeral source owns the value).
+func TestKeyWOSchemaAttributes(t *testing.T) {
+	t.Parallel()
+
+	s := keySchema(t)
+
+	attr, ok := s.Attributes["key_wo"]
+	if !ok {
+		t.Fatal("expected key_wo attribute in schema")
+	}
+	strAttr, ok := attr.(schema.StringAttribute)
+	if !ok {
+		t.Fatalf("expected key_wo to be a StringAttribute, got %T", attr)
+	}
+	if !strAttr.WriteOnly {
+		t.Error("key_wo must be WriteOnly so its value is never stored in state")
+	}
+	if !strAttr.Sensitive {
+		t.Error("key_wo must be Sensitive")
+	}
+	if !strAttr.Optional {
+		t.Error("key_wo must be Optional")
+	}
+	if strAttr.Computed {
+		t.Error("key_wo must not be Computed")
+	}
+}
+
+// TestKeyWOVersionRequiresReplace verifies key_wo_version is Optional and carries
+// a RequiresReplace plan modifier, so bumping it rotates (re-creates) the key.
+func TestKeyWOVersionRequiresReplace(t *testing.T) {
+	t.Parallel()
+
+	s := keySchema(t)
+
+	attr, ok := s.Attributes["key_wo_version"]
+	if !ok {
+		t.Fatal("expected key_wo_version attribute in schema")
+	}
+	strAttr, ok := attr.(schema.StringAttribute)
+	if !ok {
+		t.Fatalf("expected key_wo_version to be a StringAttribute, got %T", attr)
+	}
+	if !strAttr.Optional {
+		t.Error("key_wo_version must be Optional")
+	}
+	if len(strAttr.PlanModifiers) == 0 {
+		t.Fatal("key_wo_version must have a RequiresReplace plan modifier")
+	}
+
+	// Confirm a RequiresReplace modifier is wired up. The modifier's runtime
+	// behavior is owned/tested by the plugin framework; here we only assert it
+	// is present via its self-description (which is stable across framework
+	// versions) so rotation triggers a replace.
+	var hasRequiresReplace bool
+	for _, pm := range strAttr.PlanModifiers {
+		if strings.Contains(pm.Description(context.Background()), "destroy and recreate") {
+			hasRequiresReplace = true
+		}
+	}
+	if !hasRequiresReplace {
+		t.Error("key_wo_version must carry a RequiresReplace plan modifier so rotation re-creates the key")
+	}
+}
+
+// TestKeyResourceConfigValidators verifies the write-only contract is enforced
+// at config time: key_wo and key_wo_version are RequiredTogether, and key /
+// key_wo are mutually exclusive.
+func TestKeyResourceConfigValidators(t *testing.T) {
+	t.Parallel()
+
+	validators := (&KeyResource{}).ConfigValidators(context.Background())
+	if len(validators) != 2 {
+		t.Fatalf("expected 2 config validators, got %d", len(validators))
+	}
+
+	// The framework validators surface their configured paths in their
+	// description; assert both contracts are present without depending on the
+	// concrete validator types.
+	var descriptions string
+	for _, v := range validators {
+		descriptions += v.Description(context.Background()) + "\n"
+	}
+	for _, want := range []string{"key_wo", "key_wo_version", "key"} {
+		if !strings.Contains(descriptions, want) {
+			t.Errorf("expected config validators to reference %q, got:\n%s", want, descriptions)
+		}
 	}
 }
