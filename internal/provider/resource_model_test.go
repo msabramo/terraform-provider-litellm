@@ -430,7 +430,7 @@ func TestPatchModelSendsTeamPublicModelNameWhenTeamIDSet(t *testing.T) {
 		TeamID:            types.StringValue(wantTeamID),
 		Tier:              types.StringNull(),
 		Mode:              types.StringNull(),
-		AccessGroups:     types.ListNull(types.StringType),
+		AccessGroups:      types.ListNull(types.StringType),
 	}
 
 	err := r.patchModel(context.Background(), data)
