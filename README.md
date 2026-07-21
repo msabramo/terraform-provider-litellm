@@ -201,6 +201,7 @@ The Makefile provides several useful commands for development:
 - `make vet`: Runs go vet
 - `make lint`: Runs golangci-lint
 - `make clean`: Removes build artifacts and installed provider
+- `make openapi`: Fetches the live LiteLLM OpenAPI spec from a running proxy (`make local`) to `openapi.json` for reference — always matches the running LiteLLM version (generated, gitignored)
 
 ### Testing
 
