@@ -5,11 +5,65 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
+	"github.com/hashicorp/terraform-plugin-framework/resource"
+	fwschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
+
+// TestModelSchemaUsesStateForUnknownOnComputedCollections verifies that the two
+// Optional+Computed collection attributes carry a UseStateForUnknown plan
+// modifier. Without it, every update plan shows them as "(known after apply)"
+// even when untouched (issue #139). readModel already preserves the prior
+// value, so the state value is the correct prediction.
+func TestModelSchemaUsesStateForUnknownOnComputedCollections(t *testing.T) {
+	t.Parallel()
+
+	resp := &resource.SchemaResponse{}
+	(&ModelResource{}).Schema(context.Background(), resource.SchemaRequest{}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("schema diagnostics: %v", resp.Diagnostics.Errors())
+	}
+
+	// access_groups is a ListAttribute.
+	listAttr, ok := resp.Schema.Attributes["access_groups"].(fwschema.ListAttribute)
+	if !ok {
+		t.Fatalf("access_groups: expected ListAttribute, got %T", resp.Schema.Attributes["access_groups"])
+	}
+	if !listHasUseStateForUnknown(listAttr) {
+		t.Error("access_groups must carry a UseStateForUnknown plan modifier")
+	}
+
+	// additional_litellm_params is a MapAttribute.
+	mapAttr, ok := resp.Schema.Attributes["additional_litellm_params"].(fwschema.MapAttribute)
+	if !ok {
+		t.Fatalf("additional_litellm_params: expected MapAttribute, got %T", resp.Schema.Attributes["additional_litellm_params"])
+	}
+	if !mapHasUseStateForUnknown(mapAttr) {
+		t.Error("additional_litellm_params must carry a UseStateForUnknown plan modifier")
+	}
+}
+
+func listHasUseStateForUnknown(a fwschema.ListAttribute) bool {
+	for _, pm := range a.PlanModifiers {
+		if strings.Contains(pm.Description(context.Background()), "will not change") {
+			return true
+		}
+	}
+	return false
+}
+
+func mapHasUseStateForUnknown(a fwschema.MapAttribute) bool {
+	for _, pm := range a.PlanModifiers {
+		if strings.Contains(pm.Description(context.Background()), "will not change") {
+			return true
+		}
+	}
+	return false
+}
 
 func TestReadModelResolvesUnknownOptionalComputedCollections(t *testing.T) {
 	t.Parallel()
@@ -430,7 +484,7 @@ func TestPatchModelSendsTeamPublicModelNameWhenTeamIDSet(t *testing.T) {
 		TeamID:            types.StringValue(wantTeamID),
 		Tier:              types.StringNull(),
 		Mode:              types.StringNull(),
-		AccessGroups:     types.ListNull(types.StringType),
+		AccessGroups:      types.ListNull(types.StringType),
 	}
 
 	err := r.patchModel(context.Background(), data)
