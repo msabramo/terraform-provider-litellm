@@ -113,9 +113,9 @@ func (r *KeyResource) Schema(ctx context.Context, req resource.SchemaRequest, re
 			"key": schema.StringAttribute{
 				Description: "The API key value. If not specified, a key will be generated. " +
 					"Use `key_wo` instead to source the value from an ephemeral secret without persisting it in state.",
-				Optional:    true,
-				Computed:    true,
-				Sensitive:   true,
+				Optional:  true,
+				Computed:  true,
+				Sensitive: true,
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.UseStateForUnknown(),
 				},
