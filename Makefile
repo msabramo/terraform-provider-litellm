@@ -20,8 +20,18 @@ test:
 # backend (start one with `make local`). Gated by TF_ACC; backend defaults to
 # the bundled compose stack (http://localhost:4000, sk-testing-key) and can be
 # overridden with LITELLM_API_BASE / LITELLM_API_KEY.
+#
+# Writes a coverage profile (coverage-acc.out) and prints the total. Because
+# terraform-plugin-testing runs the provider in-process, this captures the
+# CRUD paths the acceptance tests drive. Set COVERPKG to scope which packages
+# count toward coverage (default: the provider package).
+COVERPKG ?= ./internal/provider/...
 testacc:
-	TF_ACC=1 go test ./internal/provider/ -run '^TestAcc' -v -timeout 30m
+	TF_ACC=1 go test ./internal/provider/ -run '^TestAcc' -v -timeout 30m \
+		-covermode=atomic -coverpkg=$(COVERPKG) -coverprofile=coverage-acc.out
+	@echo "Acceptance-test coverage:"
+	@go tool cover -func=coverage-acc.out | tail -1
+	@echo "HTML report: go tool cover -html=coverage-acc.out"
 
 fmt:
 	go fmt ./...
