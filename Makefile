@@ -16,6 +16,13 @@ install: build
 test:
 	go test ./...
 
+# Acceptance tests: run real plan/apply/import/destroy against a live LiteLLM
+# backend (start one with `make local`). Gated by TF_ACC; backend defaults to
+# the bundled compose stack (http://localhost:4000, sk-testing-key) and can be
+# overridden with LITELLM_API_BASE / LITELLM_API_KEY.
+testacc:
+	TF_ACC=1 go test ./internal/provider/ -run '^TestAcc' -v -timeout 30m
+
 fmt:
 	go fmt ./...
 
@@ -51,4 +58,4 @@ smoke: build
 	@test -n "$(resources)$(datasources)" || (echo "Usage: make smoke resources=file.tf [datasources=file.tf]"; exit 1)
 	@sh internal_testing/smoke.sh $(CURDIR) resources $(strip $(subst ,, ,$(resources))) datasources $(strip $(subst ,, ,$(datasources)))
 
-.PHONY: build install test fmt vet lint clean local logs smoke
+.PHONY: build install test testacc fmt vet lint clean local logs smoke
